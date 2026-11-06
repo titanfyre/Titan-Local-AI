@@ -1,6 +1,36 @@
 # Validation observée
 
-État relevé le **6 novembre 2026**, sur la machine Windows x64 de développement, avec Qt **6.8.3** dynamique et MSVC 2022. Ce relevé décrit des exécutions précises, pas une certification de tous les modèles ou matériels.
+État relevé le **6 novembre 2026**, sur la machine Windows x64 de développement, avec Qt **6.8.3** dynamique et MSVC 2022. Ce relevé distingue le correctif **0.1.1** des vérifications historiques **0.1.0**. Il décrit des exécutions précises, pas une certification de tous les modèles ou matériels.
+
+## Correctif 0.1.1 : action réelle et nouvelle demande
+
+La régression signalée a été reproduite directement par HTTP avec **Qwen3-0.6B** : trois demandes différentes recevaient le texte « Ouverture de Google. » sans appel d’outil. Le contexte occupait environ **1 833 tokens sur 8 192**. Un contrôle indépendant du compositeur et des délégués QML a transmis trois chaînes distinctes et affiché leurs dernières réponses distinctes : la répétition était déjà présente dans la réponse brute du modèle, sans cache de réponse dans l’interface.
+
+En mode **automatique**, l’agent effectue maintenant un routage interne à chaque tour vers la conversation, le navigateur ou les fichiers. Pour une ouverture ou une modification, il maintient l’exigence d’un véritable appel jusqu’à la tentative du courtier d’outils. Le texte d’une action planifiée est retenu jusqu’à son reçu ; une absence d’appel ou un résultat d’échec entraîne une reprise bornée ou une erreur explicite. Lorsque les confirmations sont activées, l’opération attend **Autoriser l’action** dans la boîte de dialogue. Une promesse textuelle ne constitue pas une preuve d’exécution.
+
+| Vérification 0.1.1 | Résultat observé | Portée |
+| --- | --- | --- |
+| AgentEngine sans modèle réel facultatif | **22 réussites, 0 échec, 1 ignoré** | Courtier réel, fichiers temporaires, routage et bornes d’exécution ; le scénario avec poids GGUF reste explicitement facultatif dans ce passage. |
+| Agent réel Qwen3 4B | **3 cas QtTest réussis, 0 échec, 0 ignoré** | Initialisation, un scénario composé ouverture → calcul → salutation, nettoyage. L’ouverture de la page maîtrisée est attestée par une requête HTTP reçue et un reçu d’outil. |
+| Agent réel Qwen3 0,6B | **3 cas QtTest réussis, 0 échec, 0 ignoré** | Même scénario composé après correction. L’action et le calcul réussissent ; la salutation observée est moins naturelle (« Allo ? »). |
+| Navigation de l’interface pendant une génération | Sonde Qt réussie | Nouvelle conversation et historique désactivés pendant l’activité ; brouillon, titre et sélection conservés ; navigation disponible ensuite. |
+| Google dans l’application graphique réelle | **Réussi** | Saisie via les contrôles de la vraie fenêtre, confirmation de création puis activation de l’onglet ; adresse du navigateur dédié vérifiée : `https://www.google.com/`, titre Google. Même conversation : « 6 fois 7 » → `42`, puis « allo ? » → salutation normale, sans nouvel outil. |
+| Compilation et tests 0.1.1 | **5 suites CTest réussies** | Compilation Release, protections des fichiers, protocole, runtime, navigateur et agent. Les cas nécessitant un modèle acquis séparément restent facultatifs dans CTest. |
+| Distribution 0.1.1 | Archive créée et application utilisée avec le modèle 4B | Le démarrage avec chemins système seuls et l’état du workflow sont vérifiés séparément ; voir les [exécutions GitHub](https://github.com/titanfyre/Titan-Local-AI/actions/workflows/windows.yml). |
+
+Preuves : `out/workspace-tests/engine-results.txt`, `real-agent-4b-results.txt` et `real-agent-06b-results.txt`. Les matrices HTTP de reproduction sont conservées dans `.local/bug-browser/`. Les trois cas QtTest des passages réels correspondent à l’initialisation, au scénario composé et au nettoyage, et non à trois scénarios d’agent indépendants.
+
+Le modèle local de départ vérifié est **Qwen3-4B-Q4_K_M.gguf**, **2 497 280 256 octets**, issu du dépôt officiel `Qwen/Qwen3-4B-GGUF`, révision `bc640142c66e1fdd12af0bd68f40445458f3869b`, sous Apache-2.0. SHA-256 :
+
+```text
+7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5
+```
+
+Il est disponible dans le dossier `models/` du poste de validation, avec sa provenance dans `models/MODEL-SOURCE-Qwen3-4B.json`. Les poids ne sont pas versionnés et ne sont pas inclus dans la distribution. Ces résultats ne démontrent pas une capacité universelle d’agent, notamment pour tous les petits modèles, sites ou actions.
+
+## Vérifications de base 0.1.0 — historiques
+
+Les résultats ci-dessous précèdent la correction de routage 0.1.1. Ils restent des preuves des contrôles exécutés, sans être présentés comme une nouvelle validation complète de l’archive corrigée.
 
 | Vérification | Résultat observé | Portée |
 | --- | --- | --- |
@@ -14,7 +44,7 @@
 | BrowserTools avec intégration réelle | **3 cas QtTest réussis, 0 échec** | Initialisation, un scénario composé sur page locale maîtrisée, puis nettoyage. Ce ne sont pas trois scénarios de navigation indépendants. |
 | Distribution Windows | Archive complète créée ; démarrage du binaire distribué : **sortie 0**, aucun avertissement QML | DLL Qt et MSVC, licences et sources Qt vérifiées. Essai avec PATH limité à Windows, sans chemins Qt de développement. Une machine Windows vierge reste à vérifier séparément. |
 
-## Inférence gérée
+## Inférence gérée 0.1.0
 
 Modèle utilisé : **SmolLM2-135M-Instruct-Q4_K_M.gguf**, 105 454 144 octets, provenant de `unsloth/SmolLM2-135M-Instruct-GGUF`, révision `9e6855bc4be717fca1ef21360a1db4b29d5c559a`. SHA-256 :
 
@@ -36,13 +66,13 @@ Les preuves locales sont dans `.local/runtime-validation/`, notamment `complete-
 
 Ces exécutions valident des générations courtes avec deux petits modèles. Elles ne mesurent pas la qualité générale des réponses, la consommation maximale, les modèles très volumineux, tous les découpages GGUF, tous les GPU ou un cycle prolongé d’utilisation.
 
-## Agent et fichiers
+## Agent et fichiers 0.1.0
 
 Les **17 cas AgentEngine** utilisent le vrai courtier d’outils sur des fichiers temporaires, avec un service de génération local maîtrisé. Ils couvrent une lecture puis une modification approuvée avec empreinte, le repli JSON, le refus, l’annulation, l’historique et la limite d’étapes.
 
 Un scénario lit un fichier de **50 Ko** dont le contenu envoyé au modèle est tronqué : les métadonnées structurées et l’empreinte du fichier complet sont conservées. L’agent peut alors effectuer un remplacement approuvé en vérifiant cette empreinte, avec création d’une sauvegarde. Cette vérification distingue le tronquage du contexte de la validité des protections d’écriture.
 
-## Navigateur et interface
+## Navigateur et interface 0.1.0
 
 Le scénario BrowserTools utilise **BrowserControl v0.2.0**, un profil possédé par le test et une page HTTP servie sur loopback. Il vérifie les onglets, la navigation, l’observation, la saisie, le clic, la capture et les refus de pages locales ou d’actions interdites. Aucun compte ni site tiers réel n’a été utilisé pour ce scénario.
 
@@ -66,6 +96,10 @@ $env:TITAN_TEST_REASONING_MODEL_PATH = 'D:\MesModeles\Qwen3-0.6B-Q4_0.gguf'
 $env:TITAN_TEST_INSTALL_RUNTIME = '1'
 $env:TITAN_TEST_EVIDENCE_DIRECTORY = "$PWD\.local\runtime-validation"
 .\out\build\Release\RuntimeTests.exe -v1
+
+# Scénario composé réel de l’agent automatique ; poids déjà présent, acquis séparément.
+$env:TITAN_TEST_AGENT_MODEL_PATH = 'D:\MesModeles\Qwen3-4B-Q4_K_M.gguf'
+.\out\build\Release\AgentEngineTests.exe realAutoAgentOpensOwnedPageThenAnswersNewQuestions
 
 # Ouvre uniquement le navigateur et la page locale possédés par le test.
 $env:TITAN_TEST_BROWSER = '1'

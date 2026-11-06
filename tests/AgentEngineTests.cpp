@@ -1,16 +1,21 @@
 #include "AgentEngine.h"
+#include "runtime/ModelCatalog.h"
+#include "runtime/RuntimeManager.h"
 
 #include <QCryptographicHash>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QUuid>
 #include <QtTest>
 
 #include <functional>
@@ -22,7 +27,7 @@ namespace {
 
 class ModelServer final : public QObject {
 public:
-    struct Reply { QJsonObject body; int status = 200; };
+    struct Reply { QJsonObject body; int status = 200; QString streamedText; int delayMs = 0; };
     ModelServer()
     {
         connect(&server, &QTcpServer::newConnection, this, [this] {
@@ -44,11 +49,26 @@ public:
                     const auto request = QJsonDocument::fromJson(buffer->mid(separator + 4, length)).object();
                     requests.append(request);
                     const Reply response = reply ? reply(request, requests.size() - 1) : Reply{};
-                    const auto bytes = QJsonDocument(response.body).toJson(QJsonDocument::Compact);
+                    const QByteArray prefix = response.streamedText.isEmpty() ? QByteArray{}
+                        : "data: " + QJsonDocument(QJsonObject{{"choices", QJsonArray{QJsonObject{{"delta", QJsonObject{{"content", response.streamedText}}}}}}}).toJson(QJsonDocument::Compact) + "\n\n";
+                    const QByteArray tail = response.streamedText.isEmpty() ? QByteArray{} : QByteArray("data: [DONE]\n\n");
+                    const auto bytes = response.streamedText.isEmpty() ? QJsonDocument(response.body).toJson(QJsonDocument::Compact) : prefix + tail;
+                    const QByteArray contentType = response.streamedText.isEmpty() ? "application/json" : "text/event-stream";
                     socket->write("HTTP/1.1 " + QByteArray::number(response.status)
-                                  + " Test\r\nContent-Type: application/json\r\nContent-Length: "
-                                  + QByteArray::number(bytes.size()) + "\r\nConnection: close\r\n\r\n" + bytes);
-                    socket->disconnectFromHost();
+                                  + " Test\r\nContent-Type: " + contentType + "\r\nContent-Length: "
+                                  + QByteArray::number(bytes.size()) + "\r\nConnection: close\r\n\r\n");
+                    if (response.streamedText.isEmpty()) {
+                        socket->write(bytes);
+                        socket->disconnectFromHost();
+                    } else {
+                        socket->write(prefix);
+                        const QPointer<QTcpSocket> peer(socket);
+                        QTimer::singleShot(response.delayMs, this, [peer, tail] {
+                            if (!peer) return;
+                            peer->write(tail);
+                            peer->disconnectFromHost();
+                        });
+                    }
                 });
             }
         });
@@ -78,6 +98,19 @@ ModelServer::Reply completion(const QString &text = {}, const QJsonArray &calls 
 ModelServer::Reply jsonReply(const QJsonObject &object)
 {
     return completion(QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Compact)));
+}
+
+ModelServer::Reply routeReply(const QJsonArray &families, bool mutation = false)
+{
+    return jsonReply({{"tools", families}, {"requires_action", mutation}});
+}
+
+QJsonObject routeInput(const QJsonObject &request)
+{
+    const auto messages = request.value("messages").toArray();
+    if (messages.size() != 2) return {};
+    const auto input = QJsonDocument::fromJson(messages.last().toObject().value("content").toString().toUtf8()).object();
+    return input.contains("current_request") && input.contains("previous_user_requests") ? input : QJsonObject{};
 }
 
 bool put(const QString &path, const QByteArray &bytes)
@@ -143,7 +176,7 @@ int approvals(const QSignalSpy &spy)
 
 QVariantMap settings(const QString &mode = QStringLiteral("native"), bool approval = true, int steps = 12)
 {
-    return {{"toolMode", mode}, {"approvalsEnabled", approval}, {"maxSteps", steps},
+    return {{"provider", "managed"}, {"toolMode", mode}, {"approvalsEnabled", approval}, {"maxSteps", steps},
         {"contextSize", 32768}, {"maxTokens", 512}, {"systemPrompt", "Test local tool behavior."}};
 }
 
@@ -175,6 +208,11 @@ private slots:
         engine.reset();
         tools.reset();
         model.reset();
+        // WebView2 can release its profile handles shortly after the owned
+        // browser has acknowledged shutdown. Retry only this owned temp tree.
+        const QString ownedDirectory = temporary->path();
+        QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(ownedDirectory) || QDir(ownedDirectory).removeRecursively(), 10000);
+        temporary->setAutoRemove(false);
         temporary.reset();
     }
 
@@ -274,8 +312,9 @@ private slots:
         ModelServer server;
         QVERIFY(server.listening());
         server.reply = [&](const QJsonObject &, int index) {
-            if (index == 0) return ModelServer::Reply{{{"error", QJsonObject{{"message", "tools are unsupported by this model template"}}}}, 400};
-            if (index == 1) return jsonReply({{"tool", "files_read"}, {"arguments", QJsonObject{{"path", sample}}}});
+            if (index == 0) return routeReply({"files"});
+            if (index == 1) return ModelServer::Reply{{{"error", QJsonObject{{"message", "tools are unsupported by this model template"}}}}, 400};
+            if (index == 2) return jsonReply({{"tool", "files_read"}, {"arguments", QJsonObject{{"path", sample}}}});
             return jsonReply({{"final", "Read completed."}});
         };
         QSignalSpy finished(engine.get(), &AgentEngine::finished), errors(engine.get(), &AgentEngine::error);
@@ -284,12 +323,17 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 5000);
         QCOMPARE(errors.count(), 0);
         QCOMPARE(executed.count(), 1);
-        QCOMPARE(server.requests.size(), 3);
-        QVERIFY(server.requests[0].contains("tools"));
-        QVERIFY(!server.requests[1].contains("tools"));
+        QCOMPARE(server.requests.size(), 4);
+        QVERIFY(!server.requests[0].contains("tools"));
+        QVERIFY(server.requests[0].contains("response_format"));
+        QVERIFY(server.requests[1].contains("tools"));
+        QCOMPARE(server.requests[1].value("tool_choice").toString(), QStringLiteral("required"));
+        for (const auto &value : server.requests[1].value("tools").toArray())
+            QVERIFY(value.toObject().value("function").toObject().value("name").toString().startsWith("files_"));
         QVERIFY(!server.requests[2].contains("tools"));
+        QVERIFY(!server.requests[3].contains("tools"));
         bool markedResult = false;
-        for (const auto &value : server.requests[2].value("messages").toArray()) {
+        for (const auto &value : server.requests[3].value("messages").toArray()) {
             const auto message = value.toObject();
             QVERIFY(message.value("role") != "tool");
             QVERIFY(!message.contains("tool_calls"));
@@ -302,6 +346,153 @@ private slots:
         QVERIFY(markedResult);
         QVERIFY2(historyProblem(engine->history()).isEmpty(), qPrintable(historyProblem(engine->history())));
         QCOMPARE(engine->history().last().toObject().value("content").toString(), QStringLiteral("Read completed."));
+    }
+
+    void autoGreetingRoutesWithoutToolsOrVisiblePlannerText()
+    {
+        ModelServer server;
+        QVERIFY(server.listening());
+        const QString prompt = QStringLiteral("Bonjour.");
+        server.reply = [&](const QJsonObject &, int index) { return index == 0 ? routeReply({}) : completion("Bonjour !"); };
+        QSignalSpy finished(engine.get(), &AgentEngine::finished), executed(tools.get(), &ToolBroker::completed);
+        QSignalSpy errors(engine.get(), &AgentEngine::error), approval(engine.get(), &AgentEngine::approvalRequested);
+        engine->start(prompt, settings("auto"), "fake-model", server.endpoint(), {}, {});
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 5000);
+        QCOMPARE(errors.count(), 0);
+        QCOMPARE(executed.count(), 0);
+        QCOMPARE(approvals(approval), 0);
+        QCOMPARE(server.requests.size(), 2);
+        QCOMPARE(routeInput(server.requests[0]).value("current_request").toString(), prompt);
+        QVERIFY(!server.requests[0].contains("tools"));
+        QVERIFY(!server.requests[1].contains("tools"));
+        QVERIFY(!server.requests[1].contains("tool_choice"));
+        QCOMPARE(model->rowCount(), 1);
+        QCOMPARE(model->toJson().first().toObject().value("text").toString(), QStringLiteral("Bonjour !"));
+        QCOMPARE(engine->history().last().toObject().value("content").toString(), QStringLiteral("Bonjour !"));
+    }
+
+    void autoActionWithoutToolCallsIsHiddenAndFailsAfterBoundedRetry()
+    {
+        ModelServer server;
+        QVERIFY(server.listening());
+        const QString falseClaim = QStringLiteral("Action fictive terminee.");
+        server.reply = [&](const QJsonObject &, int index) {
+            return index == 0 ? routeReply({"files"}, true) : ModelServer::Reply{{}, 200, falseClaim, 250};
+        };
+        QSignalSpy finished(engine.get(), &AgentEngine::finished), errors(engine.get(), &AgentEngine::error);
+        QSignalSpy executed(tools.get(), &ToolBroker::completed);
+        engine->start("Cree le fichier demande.", settings("auto"), "fake-model", server.endpoint(), {}, {});
+        QTRY_VERIFY_WITH_TIMEOUT(server.requests.size() >= 2, 3000);
+        QTest::qWait(80); // The SSE text has arrived; its closing frame is still withheld.
+        for (const auto &value : model->toJson()) QVERIFY(!value.toObject().value("text").toString().contains(falseClaim));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 5000);
+        QCOMPARE(errors.count(), 1);
+        QCOMPARE(executed.count(), 0);
+        QCOMPARE(server.requests.size(), 3); // Router plus two bounded action attempts.
+        for (int index = 1; index < server.requests.size(); ++index)
+            QCOMPARE(server.requests[index].value("tool_choice").toString(), QStringLiteral("required"));
+        for (const auto &value : engine->history()) QVERIFY(!value.toObject().value("content").toString().contains(falseClaim));
+        for (const auto &value : model->toJson()) QVERIFY(!value.toObject().value("text").toString().contains(falseClaim));
+        QCOMPARE(get(sample), QByteArray("original text\n"));
+        QVERIFY2(historyProblem(engine->history()).isEmpty(), qPrintable(historyProblem(engine->history())));
+    }
+
+    void autoMutationCannotBeSatisfiedByReadOnlyTool()
+    {
+        ModelServer server;
+        QVERIFY(server.listening());
+        const QString falseClaim = QStringLiteral("File changed without a mutation.");
+        server.reply = [&](const QJsonObject &, int index) {
+            if (index == 0) return routeReply({"files"}, true);
+            if (index == 1) return completion({}, {nativeCall("inspect", "files_read", {{"path", sample}})});
+            return completion(falseClaim);
+        };
+        QSignalSpy finished(engine.get(), &AgentEngine::finished), errors(engine.get(), &AgentEngine::error);
+        QSignalSpy executed(tools.get(), &ToolBroker::completed);
+        engine->start("Modifie ce fichier.", settings("auto"), "fake-model", server.endpoint(), {}, {});
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 5000);
+        QCOMPARE(executed.count(), 1);
+        QCOMPARE(errors.count(), 1);
+        QCOMPARE(server.requests.size(), 4);
+        QCOMPARE(server.requests[2].value("tool_choice").toString(), QStringLiteral("required"));
+        QCOMPARE(get(sample), QByteArray("original text\n"));
+        for (const auto &value : engine->history()) QVERIFY(!value.toObject().value("content").toString().contains(falseClaim));
+        QVERIFY2(historyProblem(engine->history()).isEmpty(), qPrintable(historyProblem(engine->history())));
+    }
+
+    void autoFailedMutationThenSuccessfulReadCannotClaimSuccess()
+    {
+        tools->setGrants({{workspace, false}});
+        ModelServer server;
+        QVERIFY(server.listening());
+        const QString falseClaim = QStringLiteral("The file was successfully changed.");
+        server.reply = [&](const QJsonObject &, int index) {
+            if (index == 0) return routeReply({"files"}, true);
+            if (index == 1) return completion({}, {nativeCall("denied_write", "files_write", {{"path", sample}, {"content", "must not be written"}})});
+            if (index == 2) return completion({}, {nativeCall("read_after_failure", "files_read", {{"path", sample}})});
+            return ModelServer::Reply{{}, 200, falseClaim, 250};
+        };
+        QSignalSpy finished(engine.get(), &AgentEngine::finished), errors(engine.get(), &AgentEngine::error);
+        QSignalSpy executed(tools.get(), &ToolBroker::completed);
+        engine->start("Modifie ce fichier.", settings("auto", false), "fake-model", server.endpoint(), {}, {});
+        QTRY_VERIFY_WITH_TIMEOUT(server.requests.size() >= 4, 3000);
+        QTest::qWait(80); // The failed mutation remains unresolved while text streams after a successful read.
+        for (const auto &value : model->toJson()) QVERIFY(!value.toObject().value("text").toString().contains(falseClaim));
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 5000);
+        QCOMPARE(executed.count(), 2);
+        QCOMPARE(errors.count(), 1);
+        QCOMPARE(server.requests.size(), 4);
+        const auto results = toolResults(engine->history());
+        QCOMPARE(code(results.value("denied_write")), QStringLiteral("read_only"));
+        QVERIFY(results.value("read_after_failure").value("ok").toBool());
+        QCOMPARE(get(sample), QByteArray("original text\n"));
+        for (const auto &value : engine->history()) QVERIFY(!value.toObject().value("content").toString().contains(falseClaim));
+        for (const auto &value : model->toJson()) QVERIFY(!value.toObject().value("text").toString().contains(falseClaim));
+        QVERIFY2(historyProblem(engine->history()).isEmpty(), qPrintable(historyProblem(engine->history())));
+    }
+
+    void autoThreeTurnsRouteCurrentUserAndExcludePastAssistantClaims()
+    {
+        const QString oldClaim = QStringLiteral("Ouverture de Google.");
+        engine->setHistory({QJsonObject{{"role", "user"}, {"content", "Ancienne demande"}},
+            QJsonObject{{"role", "assistant"}, {"content", oldClaim}}});
+        const QStringList prompts{QStringLiteral("Lis ce fichier : ") + sample, QStringLiteral("Combien font 2 + 2 ?"), QStringLiteral("Bonjour.")};
+        ModelServer server;
+        QVERIFY(server.listening());
+        QList<QJsonObject> routes;
+        server.reply = [&](const QJsonObject &request, int) {
+            const auto input = routeInput(request);
+            if (!input.isEmpty()) {
+                routes.append(input);
+                return input.value("current_request").toString() == prompts[0] ? routeReply({"files"}) : routeReply({});
+            }
+            const auto messages = request.value("messages").toArray();
+            QString current;
+            for (const auto &value : messages) if (value.toObject().value("role") == "user") current = value.toObject().value("content").toString();
+            if (current == prompts[0] && messages.last().toObject().value("role") != "tool")
+                return completion({}, {nativeCall("current_read", "files_read", {{"path", sample}})});
+            if (current == prompts[0]) return completion("Lecture terminee.");
+            return completion(current == prompts[1] ? "4" : "Bonjour !");
+        };
+        QSignalSpy finished(engine.get(), &AgentEngine::finished), errors(engine.get(), &AgentEngine::error);
+        QSignalSpy executed(tools.get(), &ToolBroker::completed);
+        for (int turn = 0; turn < prompts.size(); ++turn) {
+            model->add("user", prompts[turn]); // Same value-copy boundary as AppController.
+            engine->start(prompts[turn], settings("auto"), "fake-model", server.endpoint(), {}, {});
+            QTRY_COMPARE_WITH_TIMEOUT(finished.count(), turn + 1, 5000);
+        }
+        QCOMPARE(errors.count(), 0);
+        QCOMPARE(executed.count(), 1);
+        QCOMPARE(routes.size(), 3);
+        for (int turn = 0; turn < prompts.size(); ++turn) {
+            QCOMPARE(routes[turn].value("current_request").toString(), prompts[turn]);
+            QVERIFY(!QJsonDocument(routes[turn]).toJson().contains(oldClaim.toUtf8()));
+            const auto previous = routes[turn].value("previous_user_requests").toArray();
+            if (turn > 0) QCOMPARE(previous.last().toString(), prompts[turn - 1]);
+        }
+        QCOMPARE(engine->history().last().toObject().value("content").toString(), QStringLiteral("Bonjour !"));
+        QCOMPARE(model->toJson().last().toObject().value("text").toString(), QStringLiteral("Bonjour !"));
+        QVERIFY2(historyProblem(engine->history()).isEmpty(), qPrintable(historyProblem(engine->history())));
     }
 
     void unknownAndMalformedToolsNeverReachBroker()
@@ -565,6 +756,115 @@ private slots:
         QVERIFY(!QFileInfo::exists(pending));
         QCOMPARE(engine->history().last().toObject().value("content").toString(), QStringLiteral("New turn answered."));
         QVERIFY2(historyProblem(engine->history()).isEmpty(), qPrintable(historyProblem(engine->history())));
+    }
+
+    void realAutoAgentOpensOwnedPageThenAnswersNewQuestions()
+    {
+        const QString modelPath = qEnvironmentVariable("TITAN_TEST_AGENT_MODEL_PATH");
+        if (modelPath.isEmpty()) QSKIP("Set TITAN_TEST_AGENT_MODEL_PATH to a local tool-capable GGUF for the optional real agent/browser integration test.");
+        QVERIFY(QFileInfo(modelPath).isFile());
+        QString executable = qEnvironmentVariable("TITAN_TEST_AGENT_RUNTIME_EXECUTABLE");
+        if (executable.isEmpty()) {
+            const QString runtimeCache = qEnvironmentVariable("LOCALAPPDATA") + QStringLiteral("/titanfyre/TitanLocalAI/runtime");
+            QDirIterator installed(runtimeCache, {QStringLiteral("llama-server.exe")}, QDir::Files, QDirIterator::Subdirectories);
+            if (installed.hasNext()) executable = installed.next();
+        }
+        QVERIFY2(QFileInfo(executable).isFile(), "Provide an existing llama-server with TITAN_TEST_AGENT_RUNTIME_EXECUTABLE; this test never downloads a model or changes user settings.");
+        ModelCatalog catalog;
+        catalog.setDirectory(QFileInfo(modelPath).absolutePath());
+        QTRY_VERIFY_WITH_TIMEOUT(!catalog.scanning(), 10000);
+        QVariantMap selected;
+        for (const auto &value : catalog.models())
+            if (QFileInfo(value.toMap().value("path").toString()).canonicalFilePath() == QFileInfo(modelPath).canonicalFilePath()) selected = value.toMap();
+        QVERIFY2(!selected.isEmpty(), qPrintable(catalog.scanWarning()));
+        auto options = settings("auto", true, 6);
+        options["contextSize"] = 8192;
+        options["maxTokens"] = 768;
+        options["thinkingLevel"] = "off";
+        options["temperature"] = 0.6;
+        options["topP"] = 0.95;
+        options["systemPrompt"] = QString::fromUtf8("Tu es un assistant local utile, rigoureux et concis. R\xC3\xA9ponds dans la langue de l'utilisateur.");
+        RuntimeManager runtime;
+        runtime.configure(options);
+        runtime.setExecutable(executable);
+        QSignalSpy runtimeFailed(&runtime, &RuntimeManager::failed);
+        runtime.loadModel(selected);
+        QTRY_VERIFY_WITH_TIMEOUT(runtime.ready() || !runtimeFailed.isEmpty(), 180000);
+        QVERIFY2(runtimeFailed.isEmpty(), qPrintable(runtime.status()));
+        QTRY_VERIFY_WITH_TIMEOUT(!runtime.supportsThinking() || runtime.thinkingStyle() != "none", 10000);
+
+        QTcpServer fixture;
+        QVERIFY(fixture.listen(QHostAddress::LocalHost, 0));
+        const QString token = QStringLiteral("TITAN_OWNED_PAGE_") + QUuid::createUuid().toString(QUuid::Id128);
+        const QByteArray page = "<!doctype html><meta charset=utf-8><title>Owned agent fixture</title><h1>" + token.toUtf8() + "</h1><p>Local integration fixture only.</p>";
+        int fixtureHits = 0;
+        connect(&fixture, &QTcpServer::newConnection, this, [&] {
+            while (fixture.hasPendingConnections()) {
+                auto *socket = fixture.nextPendingConnection();
+                auto request = std::make_shared<QByteArray>();
+                auto replied = std::make_shared<bool>(false);
+                connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+                connect(socket, &QTcpSocket::readyRead, this, [&, socket, request, replied] {
+                    *request += socket->readAll();
+                    if (*replied || !request->contains("\r\n\r\n")) return;
+                    *replied = true;
+                    if (request->startsWith("GET /fixture ")) ++fixtureHits;
+                    socket->write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: "
+                                  + QByteArray::number(page.size()) + "\r\nConnection: close\r\n\r\n" + page);
+                    socket->disconnectFromHost();
+                });
+            }
+        });
+        const QString url = QStringLiteral("http://127.0.0.1:%1/fixture").arg(fixture.serverPort());
+        QSignalSpy finished(engine.get(), &AgentEngine::finished), errors(engine.get(), &AgentEngine::error);
+        QSignalSpy executed(tools.get(), &ToolBroker::completed);
+        int approved = 0, rejectedUnexpected = 0;
+        connect(engine.get(), &AgentEngine::approvalRequested, this, [&](const QVariantMap &request) {
+            if (request.isEmpty()) return;
+            const auto arguments = QJsonDocument::fromJson(request.value("preview").toString().toUtf8()).object();
+            const QString name = request.value("tool").toString();
+            const bool ownedNavigation = (name == "browser_navigate" ||
+                (name == "browser_tabs" && arguments.value("operation") == "create")) && arguments.value("url").toString() == url;
+            if (ownedNavigation) ++approved;
+            else ++rejectedUnexpected;
+            // Exercise the normal approval API, and never permit a generated
+            // destination or mutation outside this test's owned HTTP fixture.
+            QTimer::singleShot(0, engine.get(), [&, ownedNavigation] { engine->approve(ownedNavigation); });
+        });
+        const QStringList prompts{QStringLiteral("Ouvre ") + url + QStringLiteral(" dans le navigateur."),
+                                  QStringLiteral("Combien font 2 + 2 ?"), QStringLiteral("Allo ?")};
+        QStringList answers;
+        int toolsAfterOpening = -1;
+        for (int turn = 0; turn < prompts.size(); ++turn) {
+            model->add("user", prompts[turn]);
+            engine->start(prompts[turn], options, runtime.modelId(), QUrl(runtime.baseUrl()), runtime.apiKey(), runtime.thinkingStyle());
+            QTRY_COMPARE_WITH_TIMEOUT(finished.count(), turn + 1, 180000);
+            QVERIFY2(errors.isEmpty(), errors.isEmpty() ? "" : qPrintable(errors.last().first().toString()));
+            QCOMPARE(rejectedUnexpected, 0);
+            const QString answer = engine->history().last().toObject().value("content").toString();
+            QVERIFY(!answer.trimmed().isEmpty());
+            answers.append(answer);
+            if (turn == 0) {
+                QVERIFY(approved >= 1);
+                QVERIFY(fixtureHits >= 1);
+                bool actualNavigation = false;
+                for (const auto &value : engine->history()) {
+                    const auto message = value.toObject();
+                    if (message.value("role") == "tool" && decodedResult(message).value("ok").toBool()
+                        && (message.value("name") == "browser_navigate" || message.value("name") == "browser_tabs")) actualNavigation = true;
+                }
+                QVERIFY(actualNavigation);
+                toolsAfterOpening = executed.count();
+            } else {
+                QCOMPARE(executed.count(), toolsAfterOpening);
+                QVERIFY(answer != answers.first());
+                QVERIFY(!answer.contains(url));
+            }
+            qInfo().noquote() << "Real auto agent turn" << turn + 1 << ":" << answer.left(1000);
+        }
+        QVERIFY(answers[1].contains(QRegularExpression(QStringLiteral("(?:^|\\D)4(?:\\D|$)"))) || answers[1].contains("quatre", Qt::CaseInsensitive));
+        QVERIFY2(historyProblem(engine->history()).isEmpty(), qPrintable(historyProblem(engine->history())));
+        runtime.stop();
     }
 
 private:

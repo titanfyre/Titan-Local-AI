@@ -38,9 +38,18 @@ class AgentEngine final : public QObject {
     QUrl endpoint_;
     bool busy_ = false, jsonMode_ = false, toolRunning_ = false, waitingApproval_ = false,
          cancelRequested_ = false, fallbackUsed_ = false;
+    bool planning_ = false, planned_ = false, executedTool_ = false, planningPlain_ = false;
+    bool requiresAction_ = false, mutationAttempted_ = false, lastToolOk_ = false, lastMutationOk_ = false;
+    QString lastToolError_;
+    QStringList toolFamilies_;
+    int planningAttempts_ = 0, actionRetries_ = 0;
     int steps_ = 0;
     quint64 turn_ = 0;
     void requestNext();
+    void requestPlan();
+    bool acceptPlan(const QString &text);
+    QJsonArray offeredTools() const;
+    bool needsExecution() const;
     void modelCompleted(const QJsonObject &result);
     void nextTool();
     void executeCurrent();

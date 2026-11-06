@@ -51,6 +51,7 @@ ApplicationWindow {
         scrollToEnd.restart()
     }
     function newConversation() {
+        if (app.busy) return
         app.newChat()
         selectedSessionId = ""
         conversationTitle = "Nouvelle conversation"
@@ -91,7 +92,7 @@ ApplicationWindow {
         readonly property color overlay: dark ? "#ad050b12" : "#7742515a"
     }
 
-    Shortcut { sequence: "Ctrl+N"; onActivated: window.newConversation() }
+    Shortcut { sequence: "Ctrl+N"; enabled: !app.busy; onActivated: window.newConversation() }
     Shortcut { sequence: "Ctrl+,"; onActivated: window.openSettings(0) }
     Shortcut { sequence: "Ctrl+L"; onActivated: composer.forceActiveFocus() }
     Shortcut { sequence: "Escape"; enabled: app.busy && !window.hasApproval; onActivated: app.stop() }
@@ -141,7 +142,7 @@ ApplicationWindow {
                     }
                     Item { Layout.fillWidth: true }
                 }
-                AppButton { theme: ui; Layout.fillWidth: true; text: "Nouvelle conversation"; iconName: "plus"; variant: "primary"; tip: "Nouvelle conversation · Ctrl+N"; onClicked: window.newConversation() }
+                AppButton { theme: ui; Layout.fillWidth: true; text: "Nouvelle conversation"; iconName: "plus"; variant: "primary"; tip: "Nouvelle conversation · Ctrl+N"; enabled: !app.busy; onClicked: window.newConversation() }
                 AppField {
                     id: historySearch
                     theme: ui
@@ -172,9 +173,10 @@ ApplicationWindow {
                         required property var modelData
                         width: ListView.view.width
                         height: 43
+                        enabled: !app.busy
                         leftPadding: 10; rightPadding: 6
                         hoverEnabled: true
-                        onClicked: { app.openSession(modelData.id); window.selectedSessionId = modelData.id; window.conversationTitle = modelData.title; window.followConversation = true; scrollToEnd.restart() }
+                        onClicked: { if (app.busy) return; app.openSession(modelData.id); window.selectedSessionId = modelData.id; window.conversationTitle = modelData.title; window.followConversation = true; scrollToEnd.restart() }
                         Accessible.name: modelData.title
                         ToolTip.visible: hovered
                         ToolTip.text: modelData.title
