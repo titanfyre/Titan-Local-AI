@@ -1,0 +1,57 @@
+name: Windows desktop
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-package:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .deps/Qt
+            .deps/qt-sources
+          key: windows-qt-6.8.3-msvc2022-sources-v1
+      - name: Build and test
+        run: .\Build.ps1 -Configuration Release -Test
+      - name: Package Qt, QML, runtime and licenses
+        run: .\scripts\Package.ps1 -Configuration Release
+      - name: Start the packaged application with isolated settings
+        run: |
+          $package = Get-ChildItem -LiteralPath out/packages -Directory | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+          if (-not $package) { throw 'No package directory.' }
+          $env:QT_QUICK_BACKEND = 'software'
+          $env:QT_ASSUME_STDERR_HAS_CONSOLE = '1'
+          $process = Start-Process -FilePath (Join-Path $package.FullName 'TitanLocalAI.exe') -ArgumentList '--smoke-test' -WorkingDirectory $package.FullName -WindowStyle Hidden -RedirectStandardError (Join-Path $package.Parent.FullName 'smoke-stderr.log') -RedirectStandardOutput (Join-Path $package.Parent.FullName 'smoke-stdout.log') -PassThru
+          $null = $process.Handle
+          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'Packaged UI smoke test timed out.' }
+          if ($process.ExitCode -ne 0) { Get-Content -LiteralPath (Join-Path $package.Parent.FullName 'smoke-stderr.log') -ErrorAction SilentlyContinue; throw "Smoke test failed: $($process.ExitCode)" }
+      - name: Upload portable archive and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Titan-Local-AI-windows-x64
+          if-no-files-found: warn
+          path: |
+            out/packages/*.zip
+            out/packages/*.sha256
+            out/packages/*.log
+            out/build/Testing/Temporary/LastTest.log

@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "upstream": "https://github.com/ggml-org/llama.cpp",
+  "release": "b12167",
+  "verifiedFrom": "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b12167",
+  "retrievedAt": "2026-11-06",
+  "platform": "windows-x64",
+  "assets": [
+    {
+      "backend": "cpu",
+      "name": "llama-b12167-bin-win-cpu-x64.zip",
+      "bytes": 24726767,
+      "sha256": "430d22ba7693f2135f9d3e5301f7d773cf1b8ba89fdf5ca3a5cdc5d5a7173980",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12167/llama-b12167-bin-win-cpu-x64.zip"
+    },
+    {
+      "backend": "vulkan",
+      "name": "llama-b12167-bin-win-vulkan-x64.zip",
+      "bytes": 37685589,
+      "sha256": "f99b2fc83d93f4a36778e5966600c8a4a36e8a3a6660521601317c02f974ca9d",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12167/llama-b12167-bin-win-vulkan-x64.zip"
+    }
+  ],
+  "note": "RuntimeManager.cpp embeds this manifest's pins. This file is audit documentation; no Qt resource entry is required. No model assets are downloaded."
+}
