@@ -8,7 +8,7 @@ if (-not $NoQt -and -not (Test-Path -LiteralPath (Join-Path $qtRoot 'lib\cmake\Q
     $pythonCommand=Get-Command python -ErrorAction SilentlyContinue
     if (-not $pythonCommand) { throw 'Python 3.10+ est nécessaire pour préparer Qt. Installez Python puis relancez ce script.' }
     $pythonEnvironment=Join-Path $dependencyRoot 'python'
-    if (-not (Test-Path -LiteralPath (Join-Path $pythonEnvironment 'Scripts\python.exe'))) { & $pythonCommand.Source -m venv $pythonEnvironment; if ($LASTEXITCODE) { throw 'Création de l’environnement de préparation impossible.' } }
+    if (-not (Test-Path -LiteralPath (Join-Path $pythonEnvironment 'Scripts\python.exe'))) { & $pythonCommand.Source -m venv $pythonEnvironment; if ($LASTEXITCODE) { throw 'Creation de l''environnement de preparation impossible.' } }
     $pythonExe=Join-Path $pythonEnvironment 'Scripts\python.exe'
     & $pythonExe -m pip --disable-pip-version-check install 'aqtinstall==3.3.0'
     if ($LASTEXITCODE) { throw 'Installation du préparateur Qt impossible.' }
