@@ -1,5 +1,11 @@
 # Titan Local AI
 
+<!-- simple-start:start -->
+Chat with a local language model on your Windows PC.
+
+**Start here.** Open the app and load a supported GGUF model file.
+<!-- simple-start:end -->
+
 > [!IMPORTANT]
 > **Contact TitanCSA**
 >
