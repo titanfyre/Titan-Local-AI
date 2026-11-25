@@ -1,5 +1,10 @@
 # Titan Local AI
 
+> [!IMPORTANT]
+> **Contact TitanCSA**
+>
+> On [Discord](https://discord.com/app), choose **Friends → Add Friend**, enter **`titancsa`** and send the project name. Ask about commercial licensing, integration or support for this project.
+
 Assistant de bureau Windows x64 en C++20 et Qt Quick 6.8.3. Une interface française pour converser avec un modèle local et lui confier des tâches limitées sur vos fichiers et dans un navigateur dédié.
 
 - Modèles **de texte GGUF** avec `llama.cpp`, détection du dossier, métadonnées et sélection du modèle.
