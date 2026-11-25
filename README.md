@@ -3,7 +3,11 @@
 <!-- simple-start:start -->
 Chat with a local language model on your Windows PC.
 
-**Start here.** Open the app and load a supported GGUF model file.
+[First steps](#first-steps) · [Develop](#compiler-les-sources) · [Maintain](https://github.com/TitanCSA/sdk-packages/blob/main/CONTRIBUTING.md)
+
+## First steps
+
+Open the app and load a supported GGUF model file.
 <!-- simple-start:end -->
 
 > [!IMPORTANT]
